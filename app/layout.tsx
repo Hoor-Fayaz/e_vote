@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Private Voting System',
+  title: 'E-VOTE',
   description: 'Simple and secure private voting platform.',
 };
 
