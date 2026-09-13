@@ -9,6 +9,10 @@ export async function GET() {
     return NextResponse.json(data);
   } catch (error) {
     console.error('Error fetching public categories:', error);
-    return NextResponse.json({ error: 'Failed to load ballot categories' }, { status: 500 });
+    return NextResponse.json({
+      error: 'Failed to load ballot categories',
+      details: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    }, { status: 500 });
   }
 }
