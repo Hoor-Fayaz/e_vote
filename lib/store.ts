@@ -65,27 +65,35 @@ function getDefaultDb(): DatabaseSchema {
 
 // ─── Persistence Layer ────────────────────────────────────────────────────────
 
+let memoryDb: DatabaseSchema | null = null;
+
 async function loadDb(): Promise<DatabaseSchema> {
   const redis = getRedis();
 
   // 1. Try Redis first (production)
   if (redis) {
     try {
-      const data = await redis.get<DatabaseSchema>(REDIS_DB_KEY);
-      if (data) {
-        return {
-          settings: { ...DEFAULT_SETTINGS, ...data.settings },
-          categories: data.categories?.length ? data.categories : JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
-          votes: data.votes || [],
+      const rawData = await redis.get<any>(REDIS_DB_KEY);
+      if (rawData) {
+        const data: DatabaseSchema = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
+        const loaded: DatabaseSchema = {
+          settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) },
+          categories: Array.isArray(data.categories) && data.categories.length > 0
+            ? data.categories
+            : JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
+          votes: Array.isArray(data.votes) ? data.votes : [],
           voterRegistrations: data.voterRegistrations || {},
         };
+        memoryDb = loaded;
+        return loaded;
       }
       // Redis connected but no data yet — seed with defaults
       const defaults = getDefaultDb();
       await redis.set(REDIS_DB_KEY, defaults);
+      memoryDb = defaults;
       return defaults;
     } catch (err) {
-      console.error('Redis load error, falling back to filesystem:', err);
+      console.error('Redis load error, falling back to filesystem/memory:', err);
     }
   }
 
@@ -94,22 +102,30 @@ async function loadDb(): Promise<DatabaseSchema> {
     if (fs.existsSync(DB_FILE)) {
       const content = fs.readFileSync(DB_FILE, 'utf-8');
       const parsed = JSON.parse(content) as DatabaseSchema;
-      return {
-        settings: { ...DEFAULT_SETTINGS, ...parsed.settings },
-        categories: parsed.categories?.length ? parsed.categories : JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
-        votes: parsed.votes || [],
+      const loaded: DatabaseSchema = {
+        settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
+        categories: Array.isArray(parsed.categories) && parsed.categories.length > 0
+          ? parsed.categories
+          : JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
+        votes: Array.isArray(parsed.votes) ? parsed.votes : [],
         voterRegistrations: parsed.voterRegistrations || {},
       };
+      memoryDb = loaded;
+      return loaded;
     }
   } catch (err) {
-    console.warn('Filesystem load error, using defaults:', err);
+    console.warn('Filesystem load error, using memory fallback:', err);
   }
 
-  // 3. Pure in-memory defaults
-  return getDefaultDb();
+  // 3. Pure in-memory fallback (for read-only serverless without Redis)
+  if (!memoryDb) {
+    memoryDb = getDefaultDb();
+  }
+  return memoryDb;
 }
 
 async function saveDb(db: DatabaseSchema): Promise<void> {
+  memoryDb = db;
   const redis = getRedis();
 
   // 1. Save to Redis (production)
@@ -129,7 +145,7 @@ async function saveDb(db: DatabaseSchema): Promise<void> {
     }
     fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
   } catch (err) {
-    console.warn('Filesystem save failed (running in memory-only mode):', err);
+    // Expected on read-only serverless filesystems (e.g. Vercel) if Redis is not configured
   }
 }
 
@@ -165,19 +181,21 @@ export const VotingStore = {
   // ── Public categories (no vote counts exposed) ────────────────────────────
   async getPublicCategories(): Promise<{ settings: Omit<AdminSettings, 'adminPin' | 'validPasscodes'>; categories: Category[] }> {
     return readDb((db) => {
-      const activeCategories = db.categories
+      const categories = Array.isArray(db.categories) ? db.categories : [];
+      const settings = db.settings || DEFAULT_SETTINGS;
+      const activeCategories = categories
         .filter((cat) => cat.isActive)
         .sort((a, b) => a.order - b.order);
 
       return {
         settings: {
-          votingStatus: db.settings.votingStatus,
-          electionTitle: db.settings.electionTitle,
-          electionSubtitle: db.settings.electionSubtitle,
-          allowVoterName: db.settings.allowVoterName,
-          requirePasscode: db.settings.requirePasscode,
-          revealResultsToPublic: db.settings.revealResultsToPublic,
-          allowChangeVote: db.settings.allowChangeVote,
+          votingStatus: settings.votingStatus,
+          electionTitle: settings.electionTitle,
+          electionSubtitle: settings.electionSubtitle,
+          allowVoterName: settings.allowVoterName,
+          requirePasscode: settings.requirePasscode,
+          revealResultsToPublic: settings.revealResultsToPublic,
+          allowChangeVote: settings.allowChangeVote,
         },
         categories: activeCategories,
       };
@@ -315,20 +333,24 @@ export const VotingStore = {
   // ── Admin analytics ───────────────────────────────────────────────────────
   async getAdminDashboardData(): Promise<AdminDashboardData> {
     return readDb((db) => {
-      const allCategories = [...db.categories].sort((a, b) => a.order - b.order);
+      const votes = Array.isArray(db.votes) ? db.votes : [];
+      const voterRegistrations = db.voterRegistrations || {};
+      const categories = Array.isArray(db.categories) ? db.categories : [];
+      const allCategories = [...categories].sort((a, b) => a.order - b.order);
 
       const categoryStats: CategoryStats[] = allCategories.map((cat) => {
-        const categoryVotes = db.votes.filter((v) => v.categoryId === cat.id);
+        const categoryVotes = votes.filter((v) => v.categoryId === cat.id);
         const totalVotes = categoryVotes.length;
+        const candidates = Array.isArray(cat.candidates) ? cat.candidates : [];
 
-        const candidatesWithCounts = cat.candidates.map((candidate) => {
+        const candidatesWithCounts = candidates.map((candidate) => {
           const count = categoryVotes.filter((v) => v.candidateId === candidate.id).length;
           const percentage = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
           return {
             candidateId: candidate.id,
             name: candidate.name,
-            tagline: candidate.tagline,
-            avatar: candidate.avatar,
+            tagline: candidate.tagline || '',
+            avatar: candidate.avatar || '',
             badge: candidate.badge,
             votesCount: count,
             percentage,
@@ -346,23 +368,23 @@ export const VotingStore = {
         return {
           categoryId: cat.id,
           categoryName: cat.name,
-          description: cat.description,
-          icon: cat.icon,
+          description: cat.description || '',
+          icon: cat.icon || 'Award',
           totalVotes,
           candidates: candidatesWithCounts,
         };
       });
 
-      const uniqueVoters = Object.keys(db.voterRegistrations);
+      const uniqueVoters = Object.keys(voterRegistrations);
       const recentVotes = uniqueVoters
         .slice(-30)
         .reverse()
         .map((voterId) => {
-          const reg = db.voterRegistrations[voterId];
-          const voterVotes = db.votes.filter((v) => v.voterIdentifier === voterId);
+          const reg = voterRegistrations[voterId];
+          const voterVotes = votes.filter((v) => v.voterIdentifier === voterId);
           const selections = voterVotes.map((v) => {
-            const cat = db.categories.find((c) => c.id === v.categoryId);
-            const cand = cat?.candidates.find((c) => c.id === v.candidateId);
+            const cat = categories.find((c) => c.id === v.categoryId);
+            const cand = cat?.candidates?.find((c) => c.id === v.candidateId);
             return {
               categoryName: cat?.name || 'Category',
               candidateName: cand?.name || 'Option',
@@ -378,10 +400,10 @@ export const VotingStore = {
         });
 
       return {
-        settings: db.settings,
-        categories: db.categories,
+        settings: db.settings || DEFAULT_SETTINGS,
+        categories,
         totalBallotsCast: uniqueVoters.length,
-        totalVotesCount: db.votes.length,
+        totalVotesCount: votes.length,
         recentVotes,
         categoryStats,
         hourlyActivity: [],
