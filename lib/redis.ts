@@ -9,15 +9,22 @@ let client: Redis | null = null;
 export function getRedis(): Redis | null {
   if (client) return client;
 
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  let url = process.env.UPSTASH_REDIS_REST_URL?.trim();
+  let token = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
 
-  if (url && token) {
+  if (!url || !token) return null;
+
+  // Strip accidental enclosing quotes from user pasting e.g. "https://..."
+  url = url.replace(/^["']|["']$/g, '').trim();
+  token = token.replace(/^["']|["']$/g, '').trim();
+
+  try {
     client = new Redis({ url, token });
     return client;
+  } catch (err) {
+    console.error('Failed to initialize Upstash Redis client:', err);
+    return null;
   }
-
-  return null;
 }
 
 export const REDIS_DB_KEY = 'voting:db';

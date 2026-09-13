@@ -12,7 +12,6 @@ export async function GET() {
     return NextResponse.json({
       error: 'Failed to load ballot categories',
       details: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined,
     }, { status: 500 });
   }
 }

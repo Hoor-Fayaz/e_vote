@@ -17,7 +17,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       error: 'Failed to fetch admin stats',
       details: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined,
     }, { status: 500 });
   }
 }
