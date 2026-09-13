@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { Category, Candidate, Vote, AdminSettings, AdminDashboardData, CategoryStats } from '@/types/voting';
+import { getRedis, REDIS_DB_KEY } from '@/lib/redis';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'voting_db.json');
@@ -12,7 +13,6 @@ interface DatabaseSchema {
   voterRegistrations: { [identifier: string]: { timestamp: string; ipHash: string; voterName?: string } };
 }
 
-// Clean simple initial defaults
 const DEFAULT_SETTINGS: AdminSettings = {
   votingStatus: 'ACTIVE',
   electionTitle: 'Official Voting System',
@@ -21,7 +21,7 @@ const DEFAULT_SETTINGS: AdminSettings = {
   requirePasscode: false,
   validPasscodes: [],
   revealResultsToPublic: false,
-  adminPin: '', // Managed via ADMIN_PIN environment variable — not stored here
+  adminPin: '',
   allowChangeVote: false,
 };
 
@@ -34,30 +34,9 @@ const DEFAULT_CATEGORIES: Category[] = [
     isActive: true,
     order: 1,
     candidates: [
-      {
-        id: 'opt_1',
-        categoryId: 'cat_1',
-        name: 'Alex Johnson',
-        tagline: '',
-        bio: '',
-        avatar: '',
-      },
-      {
-        id: 'opt_2',
-        categoryId: 'cat_1',
-        name: 'Sarah Williams',
-        tagline: '',
-        bio: '',
-        avatar: '',
-      },
-      {
-        id: 'opt_3',
-        categoryId: 'cat_1',
-        name: 'Michael Brown',
-        tagline: '',
-        bio: '',
-        avatar: '',
-      },
+      { id: 'opt_1', categoryId: 'cat_1', name: 'Alex Johnson', tagline: '', bio: '', avatar: '' },
+      { id: 'opt_2', categoryId: 'cat_1', name: 'Sarah Williams', tagline: '', bio: '', avatar: '' },
+      { id: 'opt_3', categoryId: 'cat_1', name: 'Michael Brown', tagline: '', bio: '', avatar: '' },
     ],
   },
   {
@@ -68,218 +47,250 @@ const DEFAULT_CATEGORIES: Category[] = [
     isActive: true,
     order: 2,
     candidates: [
-      {
-        id: 'opt_4',
-        categoryId: 'cat_2',
-        name: 'David Miller',
-        tagline: '',
-        bio: '',
-        avatar: '',
-      },
-      {
-        id: 'opt_5',
-        categoryId: 'cat_2',
-        name: 'Emma Davis',
-        tagline: '',
-        bio: '',
-        avatar: '',
-      },
-      {
-        id: 'opt_6',
-        categoryId: 'cat_2',
-        name: 'James Wilson',
-        tagline: '',
-        bio: '',
-        avatar: '',
-      },
+      { id: 'opt_4', categoryId: 'cat_2', name: 'David Miller', tagline: '', bio: '', avatar: '' },
+      { id: 'opt_5', categoryId: 'cat_2', name: 'Emma Davis', tagline: '', bio: '', avatar: '' },
+      { id: 'opt_6', categoryId: 'cat_2', name: 'James Wilson', tagline: '', bio: '', avatar: '' },
     ],
   },
 ];
 
-let memoryDb: DatabaseSchema = {
-  settings: { ...DEFAULT_SETTINGS },
-  categories: JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
-  votes: [],
-  voterRegistrations: {},
-};
+function getDefaultDb(): DatabaseSchema {
+  return {
+    settings: { ...DEFAULT_SETTINGS },
+    categories: JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
+    votes: [],
+    voterRegistrations: {},
+  };
+}
 
-function ensureInitialized() {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+// ─── Persistence Layer ────────────────────────────────────────────────────────
+
+async function loadDb(): Promise<DatabaseSchema> {
+  const redis = getRedis();
+
+  // 1. Try Redis first (production)
+  if (redis) {
+    try {
+      const data = await redis.get<DatabaseSchema>(REDIS_DB_KEY);
+      if (data) {
+        return {
+          settings: { ...DEFAULT_SETTINGS, ...data.settings },
+          categories: data.categories?.length ? data.categories : JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
+          votes: data.votes || [],
+          voterRegistrations: data.voterRegistrations || {},
+        };
+      }
+      // Redis connected but no data yet — seed with defaults
+      const defaults = getDefaultDb();
+      await redis.set(REDIS_DB_KEY, defaults);
+      return defaults;
+    } catch (err) {
+      console.error('Redis load error, falling back to filesystem:', err);
     }
+  }
+
+  // 2. Filesystem fallback (local dev)
+  try {
     if (fs.existsSync(DB_FILE)) {
       const content = fs.readFileSync(DB_FILE, 'utf-8');
-      const parsed = JSON.parse(content);
-      memoryDb = {
+      const parsed = JSON.parse(content) as DatabaseSchema;
+      return {
         settings: { ...DEFAULT_SETTINGS, ...parsed.settings },
         categories: parsed.categories?.length ? parsed.categories : JSON.parse(JSON.stringify(DEFAULT_CATEGORIES)),
         votes: parsed.votes || [],
         voterRegistrations: parsed.voterRegistrations || {},
       };
-    } else {
-      saveDb();
     }
   } catch (err) {
-    // serverless fallback
+    console.warn('Filesystem load error, using defaults:', err);
   }
+
+  // 3. Pure in-memory defaults
+  return getDefaultDb();
 }
 
-function saveDb() {
+async function saveDb(db: DatabaseSchema): Promise<void> {
+  const redis = getRedis();
+
+  // 1. Save to Redis (production)
+  if (redis) {
+    try {
+      await redis.set(REDIS_DB_KEY, db);
+      return; // Redis saved — done
+    } catch (err) {
+      console.error('Redis save error, attempting filesystem fallback:', err);
+    }
+  }
+
+  // 2. Filesystem fallback (local dev)
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    fs.writeFileSync(DB_FILE, JSON.stringify(memoryDb, null, 2), 'utf-8');
-  } catch (err) {}
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Filesystem save failed (running in memory-only mode):', err);
+  }
 }
 
-ensureInitialized();
+// ─── Helper: load → operate → save ───────────────────────────────────────────
+
+async function withDb<T>(fn: (db: DatabaseSchema) => T): Promise<T> {
+  const db = await loadDb();
+  const result = fn(db);
+  await saveDb(db);
+  return result;
+}
+
+async function readDb<T>(fn: (db: DatabaseSchema) => T): Promise<T> {
+  const db = await loadDb();
+  return fn(db);
+}
+
+// ─── Public Store API (fully async) ──────────────────────────────────────────
 
 export const VotingStore = {
-  getSettings(): AdminSettings {
-    ensureInitialized();
-    return { ...memoryDb.settings };
+  // ── Settings ──────────────────────────────────────────────────────────────
+  async getSettings(): Promise<AdminSettings> {
+    return readDb((db) => ({ ...db.settings }));
   },
 
-  updateSettings(partial: Partial<AdminSettings>): AdminSettings {
-    ensureInitialized();
-    memoryDb.settings = { ...memoryDb.settings, ...partial };
-    saveDb();
-    return { ...memoryDb.settings };
+  async updateSettings(partial: Partial<AdminSettings>): Promise<AdminSettings> {
+    return withDb((db) => {
+      db.settings = { ...db.settings, ...partial };
+      return { ...db.settings };
+    });
   },
 
-  getPublicCategories(): { settings: Omit<AdminSettings, 'adminPin' | 'validPasscodes'>; categories: Category[] } {
-    ensureInitialized();
-    const activeCategories = memoryDb.categories
-      .filter((cat) => cat.isActive)
-      .sort((a, b) => a.order - b.order);
+  // ── Public categories (no vote counts exposed) ────────────────────────────
+  async getPublicCategories(): Promise<{ settings: Omit<AdminSettings, 'adminPin' | 'validPasscodes'>; categories: Category[] }> {
+    return readDb((db) => {
+      const activeCategories = db.categories
+        .filter((cat) => cat.isActive)
+        .sort((a, b) => a.order - b.order);
 
-    return {
-      settings: {
-        votingStatus: memoryDb.settings.votingStatus,
-        electionTitle: memoryDb.settings.electionTitle,
-        electionSubtitle: memoryDb.settings.electionSubtitle,
-        allowVoterName: memoryDb.settings.allowVoterName,
-        requirePasscode: memoryDb.settings.requirePasscode,
-        revealResultsToPublic: memoryDb.settings.revealResultsToPublic,
-        allowChangeVote: memoryDb.settings.allowChangeVote,
-      },
-      categories: activeCategories,
-    };
+      return {
+        settings: {
+          votingStatus: db.settings.votingStatus,
+          electionTitle: db.settings.electionTitle,
+          electionSubtitle: db.settings.electionSubtitle,
+          allowVoterName: db.settings.allowVoterName,
+          requirePasscode: db.settings.requirePasscode,
+          revealResultsToPublic: db.settings.revealResultsToPublic,
+          allowChangeVote: db.settings.allowChangeVote,
+        },
+        categories: activeCategories,
+      };
+    });
   },
 
-  getAllCategories(): Category[] {
-    ensureInitialized();
-    return [...memoryDb.categories].sort((a, b) => a.order - b.order);
+  async getAllCategories(): Promise<Category[]> {
+    return readDb((db) => [...db.categories].sort((a, b) => a.order - b.order));
   },
 
-  createCategory(name: string, description: string = ''): Category {
-    ensureInitialized();
-    const newCategory: Category = {
-      id: `cat_${Date.now()}`,
-      name: name.trim(),
-      description: description.trim(),
-      icon: 'Award',
-      isActive: true,
-      order: memoryDb.categories.length + 1,
-      candidates: [],
-    };
-    memoryDb.categories.push(newCategory);
-    saveDb();
-    return newCategory;
+  // ── Category management ───────────────────────────────────────────────────
+  async createCategory(name: string, description: string = ''): Promise<Category> {
+    return withDb((db) => {
+      const newCategory: Category = {
+        id: `cat_${Date.now()}`,
+        name: name.trim(),
+        description: description.trim(),
+        icon: 'Award',
+        isActive: true,
+        order: db.categories.length + 1,
+        candidates: [],
+      };
+      db.categories.push(newCategory);
+      return newCategory;
+    });
   },
 
-  updateCategory(id: string, updates: Partial<Category>): Category | null {
-    ensureInitialized();
-    const index = memoryDb.categories.findIndex((c) => c.id === id);
-    if (index === -1) return null;
-    memoryDb.categories[index] = { ...memoryDb.categories[index], ...updates };
-    saveDb();
-    return memoryDb.categories[index];
+  async updateCategory(id: string, updates: Partial<Category>): Promise<Category | null> {
+    return withDb((db) => {
+      const index = db.categories.findIndex((c) => c.id === id);
+      if (index === -1) return null;
+      db.categories[index] = { ...db.categories[index], ...updates };
+      return db.categories[index];
+    });
   },
 
-  deleteCategory(id: string): boolean {
-    ensureInitialized();
-    const initialLen = memoryDb.categories.length;
-    memoryDb.categories = memoryDb.categories.filter((c) => c.id !== id);
-    memoryDb.votes = memoryDb.votes.filter((v) => v.categoryId !== id);
-    saveDb();
-    return memoryDb.categories.length < initialLen;
+  async deleteCategory(id: string): Promise<boolean> {
+    return withDb((db) => {
+      const initialLen = db.categories.length;
+      db.categories = db.categories.filter((c) => c.id !== id);
+      db.votes = db.votes.filter((v) => v.categoryId !== id);
+      return db.categories.length < initialLen;
+    });
   },
 
-  addCandidate(categoryId: string, name: string): Candidate | null {
-    ensureInitialized();
-    const category = memoryDb.categories.find((c) => c.id === categoryId);
-    if (!category) return null;
+  // ── Candidate management ──────────────────────────────────────────────────
+  async addCandidate(categoryId: string, name: string): Promise<Candidate | null> {
+    return withDb((db) => {
+      const category = db.categories.find((c) => c.id === categoryId);
+      if (!category) return null;
 
-    const newCandidate: Candidate = {
-      id: `opt_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-      categoryId,
-      name: name.trim(),
-      tagline: '',
-      bio: '',
-      avatar: '',
-    };
-
-    category.candidates.push(newCandidate);
-    saveDb();
-    return newCandidate;
+      const newCandidate: Candidate = {
+        id: `opt_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+        categoryId,
+        name: name.trim(),
+        tagline: '',
+        bio: '',
+        avatar: '',
+      };
+      category.candidates.push(newCandidate);
+      return newCandidate;
+    });
   },
 
-  updateCandidate(categoryId: string, candidateId: string, name: string): Candidate | null {
-    ensureInitialized();
-    const category = memoryDb.categories.find((c) => c.id === categoryId);
-    if (!category) return null;
-    const cand = category.candidates.find((c) => c.id === candidateId);
-    if (!cand) return null;
-
-    cand.name = name.trim();
-    saveDb();
-    return cand;
+  async updateCandidate(categoryId: string, candidateId: string, name: string): Promise<Candidate | null> {
+    return withDb((db) => {
+      const category = db.categories.find((c) => c.id === categoryId);
+      if (!category) return null;
+      const cand = category.candidates.find((c) => c.id === candidateId);
+      if (!cand) return null;
+      cand.name = name.trim();
+      return cand;
+    });
   },
 
-  deleteCandidate(categoryId: string, candidateId: string): boolean {
-    ensureInitialized();
-    const category = memoryDb.categories.find((c) => c.id === categoryId);
-    if (!category) return false;
-    const initialLen = category.candidates.length;
-    category.candidates = category.candidates.filter((c) => c.id !== candidateId);
-    memoryDb.votes = memoryDb.votes.filter((v) => v.candidateId !== candidateId);
-    saveDb();
-    return category.candidates.length < initialLen;
+  async deleteCandidate(categoryId: string, candidateId: string): Promise<boolean> {
+    return withDb((db) => {
+      const category = db.categories.find((c) => c.id === categoryId);
+      if (!category) return false;
+      const initialLen = category.candidates.length;
+      category.candidates = category.candidates.filter((c) => c.id !== candidateId);
+      db.votes = db.votes.filter((v) => v.candidateId !== candidateId);
+      return category.candidates.length < initialLen;
+    });
   },
 
-  hasVoted(voterIdentifier: string): boolean {
-    ensureInitialized();
-    return !!memoryDb.voterRegistrations[voterIdentifier];
+  // ── Voting ────────────────────────────────────────────────────────────────
+  async hasVoted(voterIdentifier: string): Promise<boolean> {
+    return readDb((db) => !!db.voterRegistrations[voterIdentifier]);
   },
 
-  castBallot(payload: {
+  async castBallot(payload: {
     voterIdentifier: string;
     voterName?: string;
     ballot: { [categoryId: string]: string };
     ipHash: string;
-  }): { success: boolean; message: string; receiptId?: string } {
-    ensureInitialized();
+  }): Promise<{ success: boolean; message: string; receiptId?: string }> {
+    return withDb((db) => {
+      if (db.settings.votingStatus !== 'ACTIVE') {
+        return { success: false, message: 'Voting is currently closed or paused by the admin.' };
+      }
 
-    if (memoryDb.settings.votingStatus !== 'ACTIVE') {
-      return { success: false, message: 'Voting is currently closed or paused by the admin.' };
-    }
+      if (db.voterRegistrations[payload.voterIdentifier]) {
+        return { success: false, message: 'A vote has already been submitted with this ID / Email.' };
+      }
 
-    if (memoryDb.voterRegistrations[payload.voterIdentifier]) {
-      return { success: false, message: 'A vote has already been submitted with this ID / Email.' };
-    }
+      const timestamp = new Date().toISOString();
+      const receiptId = `VOTE-${Date.now().toString(36).toUpperCase()}`;
 
-    const timestamp = new Date().toISOString();
-    const receiptId = `VOTE-${Date.now().toString(36).toUpperCase()}`;
-
-    for (const [categoryId, candidateId] of Object.entries(payload.ballot)) {
-      const category = memoryDb.categories.find((c) => c.id === categoryId && c.isActive);
-      if (category) {
-        const candidate = category.candidates.find((c) => c.id === candidateId);
-        if (candidate) {
-          memoryDb.votes.push({
+      for (const [categoryId, candidateId] of Object.entries(payload.ballot)) {
+        const category = db.categories.find((c) => c.id === categoryId && c.isActive);
+        if (category?.candidates.find((c) => c.id === candidateId)) {
+          db.votes.push({
             id: `v_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
             categoryId,
             candidateId,
@@ -290,109 +301,108 @@ export const VotingStore = {
           });
         }
       }
-    }
 
-    memoryDb.voterRegistrations[payload.voterIdentifier] = {
-      timestamp,
-      ipHash: payload.ipHash,
-      voterName: payload.voterName,
-    };
+      db.voterRegistrations[payload.voterIdentifier] = {
+        timestamp,
+        ipHash: payload.ipHash,
+        voterName: payload.voterName,
+      };
 
-    saveDb();
-    return { success: true, message: 'Vote submitted successfully.', receiptId };
+      return { success: true, message: 'Vote submitted successfully.', receiptId };
+    });
   },
 
-  getAdminDashboardData(): AdminDashboardData {
-    ensureInitialized();
+  // ── Admin analytics ───────────────────────────────────────────────────────
+  async getAdminDashboardData(): Promise<AdminDashboardData> {
+    return readDb((db) => {
+      const allCategories = [...db.categories].sort((a, b) => a.order - b.order);
 
-    const activeCategories = memoryDb.categories.sort((a, b) => a.order - b.order);
-    const categoryStats: CategoryStats[] = activeCategories.map((cat) => {
-      const categoryVotes = memoryDb.votes.filter((v) => v.categoryId === cat.id);
-      const totalVotes = categoryVotes.length;
+      const categoryStats: CategoryStats[] = allCategories.map((cat) => {
+        const categoryVotes = db.votes.filter((v) => v.categoryId === cat.id);
+        const totalVotes = categoryVotes.length;
 
-      const candidatesWithCounts = cat.candidates.map((candidate) => {
-        const count = categoryVotes.filter((v) => v.candidateId === candidate.id).length;
-        const percentage = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
-        return {
-          candidateId: candidate.id,
-          name: candidate.name,
-          tagline: candidate.tagline,
-          avatar: candidate.avatar,
-          badge: candidate.badge,
-          votesCount: count,
-          percentage,
-          isLeader: false,
-        };
-      });
-
-      const maxVotes = Math.max(0, ...candidatesWithCounts.map((c) => c.votesCount));
-      if (maxVotes > 0) {
-        candidatesWithCounts.forEach((c) => {
-          if (c.votesCount === maxVotes) c.isLeader = true;
-        });
-      }
-
-      return {
-        categoryId: cat.id,
-        categoryName: cat.name,
-        description: cat.description,
-        icon: cat.icon,
-        totalVotes,
-        candidates: candidatesWithCounts,
-      };
-    });
-
-    const uniqueVoters = Object.keys(memoryDb.voterRegistrations);
-    const recentVotes = uniqueVoters
-      .slice(-30)
-      .reverse()
-      .map((voterId) => {
-        const reg = memoryDb.voterRegistrations[voterId];
-        const voterVotes = memoryDb.votes.filter((v) => v.voterIdentifier === voterId);
-
-        const selections = voterVotes.map((v) => {
-          const cat = memoryDb.categories.find((c) => c.id === v.categoryId);
-          const cand = cat?.candidates.find((c) => c.id === v.candidateId);
+        const candidatesWithCounts = cat.candidates.map((candidate) => {
+          const count = categoryVotes.filter((v) => v.candidateId === candidate.id).length;
+          const percentage = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
           return {
-            categoryName: cat ? cat.name : 'Category',
-            candidateName: cand ? cand.name : 'Option',
+            candidateId: candidate.id,
+            name: candidate.name,
+            tagline: candidate.tagline,
+            avatar: candidate.avatar,
+            badge: candidate.badge,
+            votesCount: count,
+            percentage,
+            isLeader: false,
           };
         });
 
+        const maxVotes = Math.max(0, ...candidatesWithCounts.map((c) => c.votesCount));
+        if (maxVotes > 0) {
+          candidatesWithCounts.forEach((c) => {
+            if (c.votesCount === maxVotes) c.isLeader = true;
+          });
+        }
+
         return {
-          id: voterId,
-          timestamp: reg?.timestamp || new Date().toISOString(),
-          voterIdentifierMasked: voterId,
-          voterName: reg?.voterName,
-          categorySelections: selections,
+          categoryId: cat.id,
+          categoryName: cat.name,
+          description: cat.description,
+          icon: cat.icon,
+          totalVotes,
+          candidates: candidatesWithCounts,
         };
       });
 
-    return {
-      settings: memoryDb.settings,
-      categories: memoryDb.categories,
-      totalBallotsCast: uniqueVoters.length,
-      totalVotesCount: memoryDb.votes.length,
-      recentVotes,
-      categoryStats,
-      hourlyActivity: [],
-    };
+      const uniqueVoters = Object.keys(db.voterRegistrations);
+      const recentVotes = uniqueVoters
+        .slice(-30)
+        .reverse()
+        .map((voterId) => {
+          const reg = db.voterRegistrations[voterId];
+          const voterVotes = db.votes.filter((v) => v.voterIdentifier === voterId);
+          const selections = voterVotes.map((v) => {
+            const cat = db.categories.find((c) => c.id === v.categoryId);
+            const cand = cat?.candidates.find((c) => c.id === v.candidateId);
+            return {
+              categoryName: cat?.name || 'Category',
+              candidateName: cand?.name || 'Option',
+            };
+          });
+          return {
+            id: voterId,
+            timestamp: reg?.timestamp || new Date().toISOString(),
+            voterIdentifierMasked: voterId,
+            voterName: reg?.voterName,
+            categorySelections: selections,
+          };
+        });
+
+      return {
+        settings: db.settings,
+        categories: db.categories,
+        totalBallotsCast: uniqueVoters.length,
+        totalVotesCount: db.votes.length,
+        recentVotes,
+        categoryStats,
+        hourlyActivity: [],
+      };
+    });
   },
 
-  resetAllVotes(): void {
-    ensureInitialized();
-    memoryDb.votes = [];
-    memoryDb.voterRegistrations = {};
-    saveDb();
+  // ── Admin actions ─────────────────────────────────────────────────────────
+  async resetAllVotes(): Promise<void> {
+    await withDb((db) => {
+      db.votes = [];
+      db.voterRegistrations = {};
+    });
   },
 
-  getExportData() {
-    ensureInitialized();
-    return {
-      settings: memoryDb.settings,
-      categories: memoryDb.categories,
-      votes: memoryDb.votes,
-      voterRegistrations: memoryDb.voterRegistrations,
-    };
+  async getExportData() {
+    return readDb((db) => ({
+      settings: db.settings,
+      categories: db.categories,
+      votes: db.votes,
+      voterRegistrations: db.voterRegistrations,
+    }));
   },
 };

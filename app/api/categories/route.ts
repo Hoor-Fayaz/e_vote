@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
-    const data = VotingStore.getPublicCategories();
+    const data = await VotingStore.getPublicCategories();
     return NextResponse.json(data);
   } catch (error) {
     console.error('Error fetching public categories:', error);

@@ -8,7 +8,7 @@ export async function GET(req: NextRequest) {
   if (!verifyAdminSession(req)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
-  return NextResponse.json(VotingStore.getSettings());
+  return NextResponse.json(await VotingStore.getSettings());
 }
 
 export async function POST(req: NextRequest) {
@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const updates = await req.json();
-    const updated = VotingStore.updateSettings(updates);
+    const updated = await VotingStore.updateSettings(updates);
     return NextResponse.json({ success: true, settings: updated });
   } catch (error) {
     return NextResponse.json({ error: 'Failed to update settings' }, { status: 500 });

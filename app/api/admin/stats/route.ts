@@ -10,7 +10,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const data = VotingStore.getAdminDashboardData();
+    const data = await VotingStore.getAdminDashboardData();
     return NextResponse.json(data);
   } catch (error) {
     console.error('Error fetching admin dashboard data:', error);

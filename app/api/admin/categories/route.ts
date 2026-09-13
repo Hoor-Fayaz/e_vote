@@ -8,7 +8,7 @@ export async function GET(req: NextRequest) {
   if (!verifyAdminSession(req)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
-  return NextResponse.json(VotingStore.getAllCategories());
+  return NextResponse.json(await VotingStore.getAllCategories());
 }
 
 export async function POST(req: NextRequest) {
@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Category name is required' }, { status: 400 });
     }
 
-    const created = VotingStore.createCategory(
+    const created = await VotingStore.createCategory(
       body.name.trim(),
       body.description || ''
     );
@@ -44,7 +44,7 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: 'Category ID is required' }, { status: 400 });
     }
 
-    const updated = VotingStore.updateCategory(body.id, body);
+    const updated = await VotingStore.updateCategory(body.id, body);
     if (!updated) {
       return NextResponse.json({ error: 'Category not found' }, { status: 404 });
     }
@@ -68,7 +68,7 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: 'Category ID is required' }, { status: 400 });
     }
 
-    const deleted = VotingStore.deleteCategory(id);
+    const deleted = await VotingStore.deleteCategory(id);
     return NextResponse.json({ success: deleted });
   } catch (error) {
     return NextResponse.json({ error: 'Failed to delete category' }, { status: 500 });

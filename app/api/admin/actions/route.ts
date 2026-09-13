@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
     const { action } = await req.json();
 
     if (action === 'RESET_VOTES') {
-      VotingStore.resetAllVotes();
+      await VotingStore.resetAllVotes();
       return NextResponse.json({ success: true, message: 'All votes have been reset to zero.' });
     }
 
@@ -31,7 +31,7 @@ export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const format = searchParams.get('format') || 'json';
-    const exportData = VotingStore.getExportData();
+    const exportData = await VotingStore.getExportData();
 
     if (format === 'csv') {
       // Build clean CSV rows

@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Category ID and candidate name are required' }, { status: 400 });
     }
 
-    const created = VotingStore.addCandidate(categoryId, candidate.name);
+    const created = await VotingStore.addCandidate(categoryId, candidate.name);
     if (!created) {
       return NextResponse.json({ error: 'Failed to add candidate. Category not found.' }, { status: 404 });
     }
@@ -37,7 +37,7 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: 'Category ID and Candidate ID are required' }, { status: 400 });
     }
 
-    const updated = VotingStore.updateCandidate(categoryId, candidateId, updates?.name || updates);
+    const updated = await VotingStore.updateCandidate(categoryId, candidateId, updates?.name || updates);
     if (!updated) {
       return NextResponse.json({ error: 'Candidate not found' }, { status: 404 });
     }
@@ -62,7 +62,7 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: 'categoryId and candidateId are required' }, { status: 400 });
     }
 
-    const deleted = VotingStore.deleteCandidate(categoryId, candidateId);
+    const deleted = await VotingStore.deleteCandidate(categoryId, candidateId);
     return NextResponse.json({ success: deleted });
   } catch (error) {
     return NextResponse.json({ error: 'Failed to delete candidate' }, { status: 500 });
