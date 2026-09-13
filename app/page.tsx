@@ -1,6 +1,5 @@
 import { VoterPortal } from '@/components/VoterPortal';
-import { ShieldCheck, Lock } from 'lucide-react';
-import Link from 'next/link';
+import { ShieldCheck } from 'lucide-react';
 
 export default function HomePage() {
   return (
@@ -16,14 +15,6 @@ export default function HomePage() {
               Voting System
             </span>
           </div>
-
-          <Link
-            href="/admin"
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors"
-          >
-            <Lock className="w-3.5 h-3.5" />
-            <span>Admin Panel</span>
-          </Link>
         </div>
       </header>
 
