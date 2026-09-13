@@ -15,8 +15,8 @@ interface DatabaseSchema {
 
 const DEFAULT_SETTINGS: AdminSettings = {
   votingStatus: 'ACTIVE',
-  electionTitle: 'Official Voting System',
-  electionSubtitle: 'Please select your preferred choice for each category and submit your vote. Your vote is private and only visible to the admin.',
+  electionTitle: ' E-VOTE',
+  electionSubtitle: 'Please select your preferred choice for each category and submit your vote. Your vote is private',
   allowVoterName: true,
   requirePasscode: false,
   validPasscodes: [],
